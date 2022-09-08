@@ -52,3 +52,8 @@ class PydanticFeatureNotInstalled(GenericException):
     """
     Raised when a user tries to use the pydantic feature but did not install it.
     """
+
+class CBORFeatureNotInstalled(GenericException):
+    """
+    Raised when a user tries to use the CBOR feature but did not install it.
+    """
