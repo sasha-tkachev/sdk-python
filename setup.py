@@ -74,5 +74,8 @@ if __name__ == "__main__":
                 "pydantic>=1.0.0<1.9.0; python_version <= '3.6'",
                 "pydantic>=1.0.0<2.0; python_version > '3.6'",
             ],
+            "cbor": [
+                "cbor2>=5.0.0,<6.0.0"
+            ]
         },
     )
