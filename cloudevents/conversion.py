@@ -11,17 +11,19 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import contextlib
 import datetime
 import enum
 import json
 import typing
+import types as pytypes
+
 
 from cloudevents import exceptions as cloud_exceptions
 from cloudevents.abstract import AnyCloudEvent
 from cloudevents.sdk import converters, marshaller, types
 from cloudevents.sdk.converters import is_binary
 from cloudevents.sdk.event import v1, v03
-
 
 def _best_effort_serialize_to_json(
     value: typing.Any, *args, **kwargs
@@ -312,3 +314,56 @@ def _json_or_string(
         return json.loads(content)
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
         return content
+
+_WELL_KNOWN_URI_ATTRIBUTES = {"source", "dataschema"}
+_URI_TAG = 32
+
+def to_cbor(
+    event: AnyCloudEvent,
+) -> typing.Union[str, bytes]:
+    """
+    Converts given `event` to an encoded CBOR data item.
+
+    :param event: A CloudEvent to be converted into an encoded CBOR data item.
+    :returns: An encoded CBOR data item representing the given event.
+    """
+    try:
+        import cbor2
+    except ImportError:
+        raise cloud_exceptions.CBORFeatureNotInstalled() # TODO: better message
+    event_dict = to_dict(event)
+    time_key = "time"
+    time = event_dict.get(time_key)
+    if isinstance(time, str):
+        # If time is a string it MUST represent an encoded RFC 3339 timestamp.
+        try:
+            event_dict[time_key] = datetime.datetime.fromisoformat(time)
+        except ValueError:
+            pass  # best effort, will be encoded as a simple string
+    
+    for attribute_name in _WELL_KNOWN_URI_ATTRIBUTES:
+        attribute_value = event_dict.get(attribute_name)
+        if isinstance(attribute_value, str):
+            event_dict[attribute_name] = cbor2.CBORTag(_URI_TAG, attribute_value)
+    return cbor2.dumps(event_dict)
+
+
+
+def from_cbor(
+    event_type: typing.Type[AnyCloudEvent],
+    data: typing.Union[str, bytes],
+) -> AnyCloudEvent:
+    """
+    Parses CBOR data item into a CloudEvent.
+
+    :param data: CBOR data item representation of a CloudEvent.
+    :param event_type: A concrete type of the event into which the data is
+        deserialized.
+    :returns: A CloudEvent parsed from the given CBOR representation.
+    """
+    try:
+        import cbor2
+    except ImportError:
+        raise cloud_exceptions.CBORFeatureNotInstalled() # TODO: better message
+    return from_dict(event_type, cbor2.loads(data))
+
