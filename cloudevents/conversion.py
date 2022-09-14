@@ -15,7 +15,6 @@ import datetime
 import enum
 import json
 import typing
-import types as pytypes
 
 
 from cloudevents import exceptions as cloud_exceptions
@@ -23,6 +22,20 @@ from cloudevents.abstract import AnyCloudEvent
 from cloudevents.sdk import converters, marshaller, types
 from cloudevents.sdk.converters import is_binary
 from cloudevents.sdk.event import v1, v03
+
+try:
+    from cbor2 import loads as _cbor_loads, dumps as _cbor_dumps, CBORTag as _CBORTag
+except ImportError:
+
+    def _fail_because_cbor_not_installed(*args, **kwargs):
+        raise cloud_exceptions.CBORFeatureNotInstalled(
+            "CloudEvents CBOR feature is not installed. "
+            "Install it using pip install cloudevents[cbor]"
+        )
+
+    _cbor_dumps = _fail_because_cbor_not_installed
+    _cbor_loads = _fail_because_cbor_not_installed
+    _CBORTag = _fail_because_cbor_not_installed
 
 
 def _best_effort_serialize_to_json(
@@ -261,9 +274,12 @@ def best_effort_encode_attribute_value(value: typing.Any) -> typing.Any:
     return value
 
 
+_DictCloudEvent = typing.Dict[typing.Any, typing.Any]
+
+
 def from_dict(
     event_type: typing.Type[AnyCloudEvent],
-    event: typing.Dict[str, typing.Any],
+    event: _DictCloudEvent,
 ) -> AnyCloudEvent:
     """
     Constructs an Event object of a given `event_type` from
@@ -281,7 +297,7 @@ def from_dict(
     return event_type.create(attributes=attributes, data=event.get("data"))
 
 
-def to_dict(event: AnyCloudEvent) -> typing.Dict[str, typing.Any]:
+def to_dict(event: AnyCloudEvent) -> _DictCloudEvent:
     """
     Converts given `event` to its canonical dictionary representation.
 
@@ -316,17 +332,44 @@ def _json_or_string(
         return content
 
 
+def _best_effort_decode_iso_formatted_time(
+    event_dict: _DictCloudEvent,
+) -> _DictCloudEvent:
+    """
+    Changes the time value to datetime representation if able.
+    This is so the time will be encoded as a CBOR time value.
+
+    :param event_dict: CloudEvent in a dict form, will be mutated.
+    :return: The mutated CloudEvent dict with possibly decoded time value.
+    """
+    time_key = "time"
+    time = event_dict.get(time_key)
+    if isinstance(time, str):
+        # If time is a string it MUST represent an encoded RFC 3339 timestamp.
+        try:
+            event_dict[time_key] = datetime.datetime.fromisoformat(time)
+        except ValueError:
+            pass  # best effort, will be encoded as a simple string
+    return event_dict
+
+
 _WELL_KNOWN_URI_ATTRIBUTES = {"source", "dataschema"}
 _URI_TAG = 32
 
 
-def _load_cbor_module() -> pytypes.ModuleType:
-    try:
-        import cbor2
+def _tag_well_known_uri_attributes(event_dict: _DictCloudEvent) -> _DictCloudEvent:
+    """
+    Convert all non-tagged URI attributes (Both Absolute URI and URI-Reference)
+    Into CBOR URI tagged strings.
 
-        return cbor2
-    except ImportError:
-        raise cloud_exceptions.CBORFeatureNotInstalled()  # TODO: better message
+    :param event_dict: CloudEvent in a dict form, will be mutated.
+    :return: The mutated CloudEvent dict with possibly tagged attribute values.
+    """
+    for attribute_name in _WELL_KNOWN_URI_ATTRIBUTES:
+        attribute_value = event_dict.get(attribute_name)
+        if isinstance(attribute_value, str):
+            event_dict[attribute_name] = _CBORTag(_URI_TAG, attribute_value)
+    return event_dict
 
 
 def to_cbor(
@@ -338,22 +381,32 @@ def to_cbor(
     :param event: A CloudEvent to be converted into an encoded CBOR data item.
     :returns: An encoded CBOR data item representing the given event.
     """
-    cbor2 = _load_cbor_module()
-    event_dict = to_dict(event)
-    time_key = "time"
-    time = event_dict.get(time_key)
-    if isinstance(time, str):
-        # If time is a string it MUST represent an encoded RFC 3339 timestamp.
-        try:
-            event_dict[time_key] = datetime.datetime.fromisoformat(time)
-        except ValueError:
-            pass  # best effort, will be encoded as a simple string
+    return _cbor_dumps(
+        _tag_well_known_uri_attributes(
+            _best_effort_decode_iso_formatted_time(to_dict(event))
+        )
+    )
 
-    for attribute_name in _WELL_KNOWN_URI_ATTRIBUTES:
-        attribute_value = event_dict.get(attribute_name)
-        if isinstance(attribute_value, str):
-            event_dict[attribute_name] = cbor2.CBORTag(_URI_TAG, attribute_value)
-    return cbor2.dumps(event_dict)
+
+def _value_without_cbor_tag(value: typing.Any):
+    """
+    :param value: Value which MAY be a tagged with a CBOR tag.
+    :return: Value without a CBOR tag.
+    """
+    if isinstance(value, _CBORTag):
+        return value.value
+    else:
+        return value
+
+
+def _strip_attribute_cbor_tags(event_dict: _DictCloudEvent) -> _DictCloudEvent:
+    """
+    Removes all CBOR taggged attribute values from a given dict CloudEvent.
+
+    :param event_dict: CloudEvent which MAY have CBOR tagged attribute values.
+    :return: CloudEvent wihtout any CBOR tagged attribute values.
+    """
+    return {key: _value_without_cbor_tag(value) for key, value in event_dict.items()}
 
 
 def from_cbor(
@@ -366,6 +419,6 @@ def from_cbor(
     :param data: CBOR data item representation of a CloudEvent.
     :param event_type: A concrete type of the event into which the data is
         deserialized.
-    :returns: A CloudEven t parsed from the given CBOR representation.
+    :returns: A CloudEvent parsed from the given CBOR representation.
     """
-    return from_dict(event_type, _load_cbor_module().loads(data))
+    return from_dict(event_type, _strip_attribute_cbor_tags(_cbor_loads(data)))
