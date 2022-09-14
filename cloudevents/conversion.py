@@ -11,7 +11,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-import contextlib
 import datetime
 import enum
 import json
@@ -24,6 +23,7 @@ from cloudevents.abstract import AnyCloudEvent
 from cloudevents.sdk import converters, marshaller, types
 from cloudevents.sdk.converters import is_binary
 from cloudevents.sdk.event import v1, v03
+
 
 def _best_effort_serialize_to_json(
     value: typing.Any, *args, **kwargs
@@ -315,8 +315,19 @@ def _json_or_string(
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
         return content
 
+
 _WELL_KNOWN_URI_ATTRIBUTES = {"source", "dataschema"}
 _URI_TAG = 32
+
+
+def _load_cbor_module() -> pytypes.ModuleType:
+    try:
+        import cbor2
+
+        return cbor2
+    except ImportError:
+        raise cloud_exceptions.CBORFeatureNotInstalled()  # TODO: better message
+
 
 def to_cbor(
     event: AnyCloudEvent,
@@ -327,10 +338,7 @@ def to_cbor(
     :param event: A CloudEvent to be converted into an encoded CBOR data item.
     :returns: An encoded CBOR data item representing the given event.
     """
-    try:
-        import cbor2
-    except ImportError:
-        raise cloud_exceptions.CBORFeatureNotInstalled() # TODO: better message
+    cbor2 = _load_cbor_module()
     event_dict = to_dict(event)
     time_key = "time"
     time = event_dict.get(time_key)
@@ -340,13 +348,12 @@ def to_cbor(
             event_dict[time_key] = datetime.datetime.fromisoformat(time)
         except ValueError:
             pass  # best effort, will be encoded as a simple string
-    
+
     for attribute_name in _WELL_KNOWN_URI_ATTRIBUTES:
         attribute_value = event_dict.get(attribute_name)
         if isinstance(attribute_value, str):
             event_dict[attribute_name] = cbor2.CBORTag(_URI_TAG, attribute_value)
     return cbor2.dumps(event_dict)
-
 
 
 def from_cbor(
@@ -359,11 +366,6 @@ def from_cbor(
     :param data: CBOR data item representation of a CloudEvent.
     :param event_type: A concrete type of the event into which the data is
         deserialized.
-    :returns: A CloudEvent parsed from the given CBOR representation.
+    :returns: A CloudEven t parsed from the given CBOR representation.
     """
-    try:
-        import cbor2
-    except ImportError:
-        raise cloud_exceptions.CBORFeatureNotInstalled() # TODO: better message
-    return from_dict(event_type, cbor2.loads(data))
-
+    return from_dict(event_type, _load_cbor_module().loads(data))
